@@ -16,5 +16,7 @@ COPY . .
 # Expor a porta 5000 (verifique se é a porta que seu servidor está utilizando)
 EXPOSE 5000
 
+RUN prisma generate
+
 # Comando para iniciar o servidor Node.js
 CMD ["yarn", "dev"]
