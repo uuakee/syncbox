@@ -2,7 +2,7 @@
 FROM node:18-alpine
 
 # Definir o diretório de trabalho dentro do container
-WORKDIR /app
+WORKDIR /src
 
 # Copiar o arquivo package.json e yarn.lock
 COPY package.json yarn.lock ./
