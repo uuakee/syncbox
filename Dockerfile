@@ -1,5 +1,5 @@
-# Use a imagem oficial do Node.js como base
-FROM node:18-alpine
+# Use a imagem oficial do Node.js 21.7.1 como base
+FROM node:21.7.1-alpine
 
 # Definir o diretório de trabalho dentro do container
 WORKDIR /src
@@ -13,8 +13,8 @@ RUN yarn install
 # Copiar o restante do código da aplicação
 COPY . .
 
-# Expor a porta 3000 (verifique se é a porta que seu servidor está utilizando)
+# Expor a porta 5000 (verifique se é a porta que seu servidor está utilizando)
 EXPOSE 5000
 
 # Comando para iniciar o servidor Node.js
-CMD ["node", "server.js"]
+CMD ["yarn", "dev"]
