@@ -20,6 +20,9 @@ router.get('/categories-movies-m3u', SyncController.getCategoriesMoviesM3U);
 router.get('/categories-series-m3u', SyncController.getCategoriesSeriesM3U);
 router.get('/download-m3u', SyncController.getDownloadM3U);
 router.get('/test-m3u-parser', SyncController.testM3UParser);
-
+router.get('/download-and-parse-m3u', SyncController.downloadAndParseM3U);
+router.post('/sync-m3u', SyncController.importM3UDataToXUI);
+router.post('/sync-m3u-series', SyncController.importM3UDataToXUIForSeries);
+router.get('/getPlan', UserController.getPlan);
 
 module.exports = router;
