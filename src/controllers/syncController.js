@@ -6,6 +6,10 @@ const { PrismaClient } = require('@prisma/client');
 const axios = require('axios');
 const prisma = new PrismaClient();
 
+function normalizeText(text) {
+  return text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
 const SyncController = {
   async getCategoriesMovies(req, res) {
     try {
@@ -228,9 +232,7 @@ const SyncController = {
             return res.status(400).json({ sucesso: false, erro: 'URL do arquivo M3U é obrigatória.' });
         }
 
-        console.log('M3U URL:', m3uUrl);  // Log da URL do M3U
-
-        // Buscar o nickname do usuário no banco de dados pelo userId
+        // Busca nickname do usuário pelo userId
         const user = await prisma.user.findUnique({
             where: { id: userId },
             select: { nickname: true },
@@ -241,7 +243,6 @@ const SyncController = {
         }
 
         const nickname = user.nickname;
-        console.log('Nickname do usuário:', nickname);  // Log do nickname do usuário
 
         // Busca a conexão de banco de dados mais recente do usuário
         const recentConnection = await prisma.databaseCredential.findFirst({
@@ -254,9 +255,6 @@ const SyncController = {
         }
 
         const { host, usuario, senha } = recentConnection;
-        console.log('Conexão de banco de dados encontrada:', { host, usuario });  // Log da conexão do banco
-
-        // Portas para verificar a conexão
         const ports = [3306, 7999];
         let connection;
         let connected = false;
@@ -274,23 +272,21 @@ const SyncController = {
                 });
 
                 await connection.connect();
-                console.log(`Conectado ao banco de dados na porta ${port}`);  // Log da conexão com sucesso
 
-                // Verifica se a base de dados xui existe
+                // Verifica se a base de dados xui ou xtream_iptvpro existe
                 const [xuiResult] = await connection.execute("SHOW DATABASES LIKE 'xui'");
                 if (xuiResult.length > 0) {
                     databaseName = 'xui';
                     connected = true;
-                    successfulPort = port;  // Salva a porta usada com sucesso
+                    successfulPort = port;
                     break;
                 }
 
-                // Verifica se a base de dados xtream_iptvpro existe
                 const [xtreamResult] = await connection.execute("SHOW DATABASES LIKE 'xtream_iptvpro'");
                 if (xtreamResult.length > 0) {
                     databaseName = 'xtream_iptvpro';
                     connected = true;
-                    successfulPort = port;  // Salva a porta usada com sucesso
+                    successfulPort = port;
                     break;
                 }
 
@@ -305,93 +301,68 @@ const SyncController = {
             return res.status(400).json({ sucesso: false, erro: 'Falha na conexão com o banco de dados em ambas as portas ou nenhuma base de dados compatível encontrada.' });
         }
 
-        console.log(`Conectado ao banco de dados ${databaseName} na porta ${successfulPort}`);  // Log do banco de dados conectado e porta usada
-
-        // Estabelece nova conexão com o banco correto na porta correta
+        // Conecta ao banco de dados correto na porta correta
         connection = await mysql.createConnection({
             host,
             user: usuario,
             password: senha,
             database: databaseName,
-            port: successfulPort,  // Usa a porta onde a conexão foi bem-sucedida
+            port: successfulPort,
         });
 
-        // Buscar os bouquets do banco de dados
+        // Busca os bouquets do banco de dados
         const [bouquets] = await connection.execute('SELECT * FROM bouquets');
-        console.log('Bouquets encontrados:', bouquets);  // Log dos bouquets encontrados
 
         // Cria diretório temporário para salvar o arquivo M3U
         const tempDir = path.join(__dirname, '../temp');
         if (!fs.existsSync(tempDir)) {
             fs.mkdirSync(tempDir);
         }
-        console.log('Diretório temporário verificado/criado:', tempDir);  // Log da criação do diretório
 
-        // Cria nome do arquivo baseado no nickname e data
         const fileName = `m3u_${nickname}_${Date.now()}.m3u`;
         const filePath = path.join(tempDir, fileName);
 
- // Faz o download do arquivo M3U e salva no diretório temporário
-const response = await axios.get(m3uUrl, { 
-  responseType: 'stream',
-  headers: {
-      Host: new URL(m3uUrl).host // Adiciona o cabeçalho Host calculado a partir da URL
-  }
-}).catch(err => {
-  console.error('Erro ao acessar a URL do M3U:', err.message);
-  return res.status(500).json({ sucesso: false, erro: 'Erro ao acessar a URL do M3U.', detalhes: err.message });
-});
+        // Faz o download do arquivo M3U
+        const response = await axios.get(m3uUrl, { 
+            responseType: 'stream',
+            headers: {
+                Host: new URL(m3uUrl).host
+            }
+        }).catch(err => {
+            console.error('Erro ao acessar a URL do M3U:', err.message);
+            return res.status(500).json({ sucesso: false, erro: 'Erro ao acessar a URL do M3U.', detalhes: err.message });
+        });
 
-// Interrompe o fluxo se o download falhar
-if (!response || response.status !== 200) {
-  return;
-}
-
+        if (!response || response.status !== 200) return;
 
         const writer = fs.createWriteStream(filePath);
         response.data.pipe(writer);
 
         writer.on('finish', async () => {
-            console.log('Arquivo M3U salvo em:', filePath);  // Log da finalização do download
-
             try {
-                // Lê o conteúdo do arquivo M3U após o download
                 let playlist = fs.readFileSync(filePath, 'utf8');
-                console.log('Arquivo M3U lido com sucesso:', playlist.substring(0, 100));  // Log do início do conteúdo da playlist (mostra apenas os primeiros 100 caracteres)
 
-                // Faz o parsing do conteúdo M3U
                 const result = parser.parse(playlist);
-                console.log('Resultado do parsing do M3U:', result);  // Log do resultado do parsing
 
                 // Verifica o valor do parâmetro `type` e ajusta o filtro de categorias
-                let prefix = 'FILMES | ';
-                if (type === '2') {
-                    prefix = 'SERIES | ';
-                }
+                let prefix = type === '2' ? 'series | ' : 'filmes | ';
 
-                // Mapeia as categorias com base no prefixo escolhido, ignorando maiúsculas/minúsculas
+                // Mapeia as categorias, ignorando acentos e maiúsculas/minúsculas
                 const categoriesMap = {};
                 result.items.forEach(item => {
                     const category = item.group.title;
-                    if (category && category.toUpperCase().startsWith(prefix.toUpperCase())) {
-                        if (!categoriesMap[category]) {
-                            categoriesMap[category] = 1;
-                        } else {
-                            categoriesMap[category]++;
-                        }
+                    if (category && normalizeText(category).startsWith(prefix)) {
+                        categoriesMap[category] = (categoriesMap[category] || 0) + 1;
                     }
                 });
 
-                console.log('Categorias mapeadas:', categoriesMap);  // Log das categorias mapeadas
-
-                // Transforma o objeto de categorias em um array com id e nome da categoria
                 const categoriesWithId = Object.keys(categoriesMap).map((categoryName, index) => ({
                     id: index + 1,
                     category: categoryName,
                     count: categoriesMap[categoryName],
                 }));
 
-                // **Adicionar o id-category correto no final de cada linha #EXTINF**
+                // Adiciona id-category a cada linha #EXTINF
                 let playlistLines = playlist.split('\n');
                 playlistLines = playlistLines.map(line => {
                     if (line.startsWith('#EXTINF')) {
@@ -407,15 +378,9 @@ if (!response || response.status !== 200) {
                     return line;
                 });
 
-                // Salva novamente o arquivo M3U com as modificações
                 fs.writeFileSync(filePath, playlistLines.join('\n'), 'utf8');
-                console.log('Arquivo M3U modificado salvo com sucesso.');  // Log da finalização do processo de modificação
-
-                // Fechar a conexão com o banco
                 await connection.end();
-                console.log('Conexão com o banco de dados fechada.');  // Log do fechamento da conexão
 
-                // Retorna as categorias e os bouquets
                 res.status(200).json({ 
                     sucesso: true, 
                     categories: categoriesWithId,
@@ -442,11 +407,9 @@ if (!response || response.status !== 200) {
             res.status(500).json({ sucesso: false, erro: 'Erro ao baixar e processar o arquivo M3U.', detalhes: error.message });
         }
     }
-},
-
+  },
  
-  
-async importM3UDataToXUI(req, res) {
+  async importM3UDataToXUI(req, res) {
   try {
     const { selectedCategories, bouquetId } = req.body; // IDs das categorias e do bouquet selecionados pelo cliente
     const userId = req.user.id;
@@ -736,245 +699,290 @@ async importM3UDataToXUI(req, res) {
     console.log("Erro durante o processo:", error);
     res.status(500).json({ sucesso: false, erro: 'Erro ao importar categorias e filmes para o banco de dados.', detalhes: error.message });
   }
-},
+  },
 
-async importM3UDataToXUIForSeries(req, res) {
-  try {
-    const { selectedCategories, bouquetId } = req.body;
-    const userId = req.user.id;
-    const tmdbApiKey = 'eccd65f46c3e9745bfd11d9b8346bff5';
-
-    console.log("Iniciando importM3UDataToXUIForSeries...");
-
-    // Buscar o nickname do usuário no banco de dados pelo userId
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      select: { nickname: true },
-    });
-
-    if (!user || !user.nickname) {
-      console.log("Usuário ou nickname não encontrado.");
-      return res.status(404).json({ sucesso: false, erro: 'Usuário ou nickname não encontrado.' });
-    }
-
-    const nickname = user.nickname;
-    console.log(`Nickname do usuário: ${nickname}`);
-
-    // Busca a conexão de banco de dados mais recente do usuário
-    const recentConnection = await prisma.databaseCredential.findFirst({
-      where: { userId },
-      orderBy: { createdAt: 'desc' },
-    });
-
-    if (!recentConnection) {
-      console.log("Nenhuma conexão de banco de dados encontrada.");
-      return res.status(404).json({ sucesso: false, erro: 'Nenhuma conexão de banco de dados encontrada.' });
-    }
-
-    const { host, usuario, senha } = recentConnection;
-    console.log('Conexão de banco de dados encontrada:', { host, usuario });
-
-    const ports = [3306, 7999];
-    let connection;
-    let connected = false;
-    let databaseName = '';
-    let successfulPort = null;
-    let categoryTable = 'streams_categories';
-
-    for (const port of ports) {
-      try {
-        connection = await mysql.createConnection({ host, user: usuario, password: senha, port });
-        await connection.connect();
-        console.log(`Conectado ao banco de dados na porta ${port}`);
-
-        const [xuiResult] = await connection.execute("SHOW DATABASES LIKE 'xui'");
-        if (xuiResult.length > 0) {
-          databaseName = 'xui';
-          connected = true;
-          successfulPort = port;
-          if (port === 7999) categoryTable = 'stream_categories';
-          break;
-        }
-
-        const [xtreamResult] = await connection.execute("SHOW DATABASES LIKE 'xtream_iptvpro'");
-        if (xtreamResult.length > 0) {
-          databaseName = 'xtream_iptvpro';
-          connected = true;
-          successfulPort = port;
-          if (port === 7999) categoryTable = 'stream_categories';
-          break;
-        }
-      } catch (connectionError) {
-        console.error(`Erro ao conectar ao banco de dados na porta ${port}:`, connectionError.message);
-      } finally {
-        if (connection) await connection.end();
+  async importM3UDataToXUIForSeries(req, res) {
+    try {
+      const { selectedCategories, bouquetId } = req.body;
+      const userId = req.user.id;
+      const tmdbApiKey = 'eccd65f46c3e9745bfd11d9b8346bff5';
+  
+      console.log("Iniciando importM3UDataToXUIForSeries...");
+  
+      // Buscar o nickname do usuário no banco de dados pelo userId
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { nickname: true },
+      });
+  
+      if (!user || !user.nickname) {
+        console.log("Usuário ou nickname não encontrado.");
+        return res.status(404).json({ sucesso: false, erro: 'Usuário ou nickname não encontrado.' });
       }
-    }
-
-    if (!connected) {
-      console.log('Falha na conexão com o banco de dados em ambas as portas ou nenhuma base de dados compatível encontrada.');
-      return res.status(400).json({ sucesso: false, erro: 'Falha na conexão com o banco de dados em ambas as portas ou nenhuma base de dados compatível encontrada.' });
-    }
-
-    console.log(`Conectado ao banco de dados ${databaseName} na porta ${successfulPort}`);
-    connection = await mysql.createConnection({
-      host,
-      user: usuario,
-      password: senha,
-      database: databaseName,
-      port: successfulPort,
-    });
-
-    console.log("Conexão ao banco de dados estabelecida.");
-
-    const tempDir = path.join(__dirname, '../temp');
-    const files = fs.readdirSync(tempDir);
-    const recentFile = files.filter(file => file.includes(`m3u_${nickname}`))
-                            .map(file => ({ file, time: fs.statSync(path.join(tempDir, file)).mtime.getTime() }))
-                            .sort((a, b) => b.time - a.time)[0];
-
-    if (!recentFile) {
-      console.log("Nenhum arquivo M3U encontrado para o usuário.");
-      return res.status(400).json({ sucesso: false, erro: 'Nenhum arquivo M3U encontrado para o usuário.' });
-    }
-
-    console.log(`Arquivo M3U encontrado: ${recentFile.file}`);
-    const filePath = path.join(tempDir, recentFile.file);
-    const playlistContent = fs.readFileSync(filePath, 'utf8');
-    const result = parser.parse(playlistContent);
-    console.log("Arquivo M3U parseado com sucesso.");
-
-    const filteredCategories = result.items.filter(item => {
-      const categoryMatch = item.raw.match(/id-category="(\d+)"/);
-      return categoryMatch && selectedCategories.includes(parseInt(categoryMatch[1]));
-    });
-
-    if (filteredCategories.length === 0) {
-      console.log("Nenhuma categoria foi mapeada.");
-      return res.status(400).json({ sucesso: false, erro: 'Nenhuma categoria foi mapeada do M3U.' });
-    }
-
-    const uniqueCategories = new Map();
-    for (const item of filteredCategories) {
-      const categoryMatch = item.raw.match(/id-category="(\d+)"/);
-      if (categoryMatch) {
-        const categoryId = categoryMatch[1];
-        const groupTitle = item.group.title.replace(/['"]/g, "");
-        uniqueCategories.set(categoryId, groupTitle);
+  
+      const nickname = user.nickname;
+      console.log(`Nickname do usuário: ${nickname}`);
+  
+      // Conectar ao banco de dados
+      const recentConnection = await prisma.databaseCredential.findFirst({
+        where: { userId },
+        orderBy: { createdAt: 'desc' },
+      });
+  
+      if (!recentConnection) {
+        console.log("Nenhuma conexão de banco de dados encontrada.");
+        return res.status(404).json({ sucesso: false, erro: 'Nenhuma conexão de banco de dados encontrada.' });
       }
-    }
-
-    async function ensureCategoryExists(connection, groupTitle) {
-      const [existingCategory] = await connection.execute(
-        `SELECT id FROM streams_categories WHERE category_name = ? AND category_type = 'series'`,
-        [groupTitle]
-      );
-
-      if (existingCategory.length === 0) {
-        const insertCategoryQuery = `
-          INSERT INTO streams_categories (category_type, category_name, parent_id, cat_order, is_adult)
-          VALUES ('series', ?, 0, 0, '0')
-        `;
-        const [insertResult] = await connection.execute(insertCategoryQuery, [groupTitle]);
-        return insertResult.insertId;
-      } else {
-        return existingCategory[0].id;
-      }
-    }
-
-    async function insertSeriesToStreamsSeries(connection, seriesName, categoryId) {
-      const [existingSeries] = await connection.execute(
-        `SELECT id FROM streams_series WHERE title = ? AND category_id = ?`,
-        [seriesName, `[${categoryId}]`]
-      );
-
-      if (existingSeries.length > 0) {
-        console.log(`Série '${seriesName}' já existe no streams_series com ID: ${existingSeries[0].id}`);
-        return existingSeries[0].id;
-      }
-
-      console.log(`Inserindo série '${seriesName}' no streams_series`);
-
-      const insertSeriesQuery = `
-        INSERT INTO streams_series (title, category_id, cover, cover_big, plot, year)
-        VALUES (?, ?, '', '', '', YEAR(CURDATE()))
-      `;
-      const [result] = await connection.execute(insertSeriesQuery, [seriesName, `[${categoryId}]`]);
-
-      console.log(`Série '${seriesName}' inserida com sucesso com ID: ${result.insertId}`);
-      return result.insertId;
-    }
-
-    async function insertEpisodesForSeries(connection, seriesData, categoryId, seriesId) {
-      const insertedEpisodeIds = [];
-
-      for (const episode of seriesData) {
+  
+      const { host, usuario, senha } = recentConnection;
+      console.log('Conexão de banco de dados encontrada:', { host, usuario });
+  
+      const ports = [3306, 7999];
+      let connection;
+      let connected = false;
+      let databaseName = '';
+      let successfulPort = null;
+      let categoryTable = 'streams_categories';
+  
+      for (const port of ports) {
         try {
+          connection = await mysql.createConnection({ host, user: usuario, password: senha, port });
+          await connection.connect();
+          console.log(`Conectado ao banco de dados na porta ${port}`);
+  
+          const [xuiResult] = await connection.execute("SHOW DATABASES LIKE 'xui'");
+          if (xuiResult.length > 0) {
+            databaseName = 'xui';
+            connected = true;
+            successfulPort = port;
+            if (port === 7999) categoryTable = 'stream_categories';
+            break;
+          }
+  
+          const [xtreamResult] = await connection.execute("SHOW DATABASES LIKE 'xtream_iptvpro'");
+          if (xtreamResult.length > 0) {
+            databaseName = 'xtream_iptvpro';
+            connected = true;
+            successfulPort = port;
+            if (port === 7999) categoryTable = 'stream_categories';
+            break;
+          }
+        } catch (connectionError) {
+          console.error(`Erro ao conectar ao banco de dados na porta ${port}:`, connectionError.message);
+        } finally {
+          if (connection) await connection.end();
+        }
+      }
+  
+      if (!connected) {
+        console.log('Falha na conexão com o banco de dados em ambas as portas ou nenhuma base de dados compatível encontrada.');
+        return res.status(400).json({ sucesso: false, erro: 'Falha na conexão com o banco de dados em ambas as portas ou nenhuma base de dados compatível encontrada.' });
+      }
+  
+      console.log(`Conectado ao banco de dados ${databaseName} na porta ${successfulPort}`);
+      connection = await mysql.createConnection({
+        host,
+        user: usuario,
+        password: senha,
+        database: databaseName,
+        port: successfulPort,
+      });
+  
+      console.log("Conexão ao banco de dados estabelecida.");
+  
+      const tempDir = path.join(__dirname, '../temp');
+      const files = fs.readdirSync(tempDir);
+      const recentFile = files.filter(file => file.includes(`m3u_${nickname}`))
+                              .map(file => ({ file, time: fs.statSync(path.join(tempDir, file)).mtime.getTime() }))
+                              .sort((a, b) => b.time - a.time)[0];
+  
+      if (!recentFile) {
+        console.log("Nenhum arquivo M3U encontrado para o usuário.");
+        return res.status(400).json({ sucesso: false, erro: 'Nenhum arquivo M3U encontrado para o usuário.' });
+      }
+  
+      console.log(`Arquivo M3U encontrado: ${recentFile.file}`);
+      const filePath = path.join(tempDir, recentFile.file);
+      const playlistContent = fs.readFileSync(filePath, 'utf8');
+      const result = parser.parse(playlistContent);
+      console.log("Arquivo M3U parseado com sucesso.");
+  
+      const filteredCategories = result.items.filter(item => {
+        const categoryMatch = item.raw.match(/id-category="(\d+)"/);
+        return categoryMatch && selectedCategories.includes(parseInt(categoryMatch[1]));
+      });
+  
+      if (filteredCategories.length === 0) {
+        console.log("Nenhuma categoria foi mapeada.");
+        return res.status(400).json({ sucesso: false, erro: 'Nenhuma categoria foi mapeada do M3U.' });
+      }
+  
+      const uniqueCategories = new Map();
+      for (const item of filteredCategories) {
+        const categoryMatch = item.raw.match(/id-category="(\d+)"/);
+        if (categoryMatch) {
+          const categoryId = categoryMatch[1];
+          const groupTitle = item.group.title.replace(/['"]/g, "");
+          uniqueCategories.set(categoryId, groupTitle);
+        }
+      }
+  
+      async function ensureCategoryExists(connection, groupTitle) {
+        const [existingCategory] = await connection.execute(
+          `SELECT id FROM streams_categories WHERE category_name = ? AND category_type = 'series'`,
+          [groupTitle]
+        );
+  
+        if (existingCategory.length === 0) {
+          const insertCategoryQuery = `
+            INSERT INTO streams_categories (category_type, category_name, parent_id, cat_order, is_adult)
+            VALUES ('series', ?, 0, 0, '0')
+          `;
+          const [insertResult] = await connection.execute(insertCategoryQuery, [groupTitle]);
+          return insertResult.insertId;
+        } else {
+          return existingCategory[0].id;
+        }
+      }
+  
+      async function fetchSeriesInfoFromTMDB(seriesName) {
+        try {
+          const tmdbResponse = await axios.get(`https://api.themoviedb.org/3/search/tv`, {
+            params: {
+              api_key: tmdbApiKey,
+              query: seriesName,
+              language: "pt-BR"
+            },
+          });
+          return tmdbResponse.data.results[0];
+        } catch (error) {
+          console.error(`Erro ao buscar informações da série '${seriesName}' no TMDB:`, error.message);
+          return null;
+        }
+      }
+  
+      async function insertSeriesToStreamsSeries(connection, seriesName, categoryId) {
+        const [existingSeries] = await connection.execute(
+          `SELECT id FROM streams_series WHERE title = ? AND category_id = ?`,
+          [seriesName, `[${categoryId}]`]
+        );
+  
+        if (existingSeries.length > 0) {
+          console.log(`Série '${seriesName}' já existe no streams_series com ID: ${existingSeries[0].id}`);
+          return existingSeries[0].id;
+        }
+  
+        // Buscar informações da série no TMDB
+        const seriesData = await fetchSeriesInfoFromTMDB(seriesName);
+        const cover = seriesData ? `https://image.tmdb.org/t/p/w500${seriesData.poster_path}` : '';
+        const coverBig = seriesData ? `https://image.tmdb.org/t/p/original${seriesData.backdrop_path}` : '';
+        const plot = seriesData ? seriesData.overview : '';
+        const year = seriesData ? seriesData.first_air_date.split('-')[0] : new Date().getFullYear();
+  
+        console.log(`Inserindo série '${seriesName}' no streams_series`);
+  
+        const insertSeriesQuery = `
+          INSERT INTO streams_series (title, category_id, cover, cover_big, plot, year)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `;
+        const [result] = await connection.execute(insertSeriesQuery, [seriesName, `[${categoryId}]`, cover, coverBig, plot, year]);
+  
+        console.log(`Série '${seriesName}' inserida com sucesso com ID: ${result.insertId}`);
+        return result.insertId;
+      }
+  
+      async function insertEpisodesForSeries(connection, seriesData, categoryId, seriesId) {
+        const insertedEpisodeIds = [];
+  
+        // Obter episódios já existentes para esta série
+        const [existingEpisodes] = await connection.execute(
+          `SELECT stream_display_name FROM streams WHERE category_id = ? AND series_no = ?`,
+          [`[${categoryId}]`, seriesId]
+        );
+        const existingEpisodeNames = new Set(existingEpisodes.map(ep => ep.stream_display_name));
+  
+        for (const episode of seriesData) {
           const displayName = episode.stream_display_name || episode.tvg?.name;
           if (!displayName) continue;
-
-          const seriesName = displayName.replace(/S\d+E\d+/i, "").trim();
+  
+          // Pular inserção se o episódio já existir
+          if (existingEpisodeNames.has(displayName)) {
+            console.log(`Episódio '${displayName}' já existe no banco de dados.`);
+            continue;
+          }
+  
           const seasonMatch = displayName.match(/S(\d+)E(\d+)/i);
           if (!seasonMatch) continue;
-
+  
           const seasonNumber = seasonMatch[1];
           const episodeNumber = seasonMatch[2];
-
+  
           const insertEpisodeQuery = `
             INSERT INTO streams (type, category_id, stream_display_name, stream_source, target_container, added, series_no, year)
             VALUES ('5', ?, ?, ?, 'mp4', NOW(), ?, YEAR(CURDATE()))
           `;
-
+  
           const [insertResult] = await connection.execute(insertEpisodeQuery, [
-            `[${categoryId}]`, // Ajuste para incluir o ID entre colchetes
+            `[${categoryId}]`,
             displayName,
             JSON.stringify([episode.url]),
             seasonNumber
           ]);
-
+  
           const streamId = insertResult.insertId;
           insertedEpisodeIds.push({ streamId, seasonNumber, episodeNumber });
-        } catch (error) {
-          console.error(`Erro ao inserir episódio ${displayName || "desconhecido"}:`, error.message);
+  
+          const insertEpisodeToSeriesQuery = `
+            INSERT INTO streams_episodes (season_num, episode_num, series_id, stream_id)
+            VALUES (?, ?, ?, ?)
+          `;
+          await connection.execute(insertEpisodeToSeriesQuery, [
+            seasonNumber,
+            episodeNumber,
+            seriesId,
+            streamId
+          ]);
+        }
+  
+        return insertedEpisodeIds;
+      }
+  
+      const allInsertedEpisodeIds = [];
+      for (const [categoryId, groupTitle] of uniqueCategories) {
+        const categoryDbId = await ensureCategoryExists(connection, groupTitle);
+        const seriesGroups = new Map();
+  
+        filteredCategories.forEach(item => {
+          const displayName = item.tvg?.name;
+          if (displayName) {
+            const seriesName = displayName.replace(/S\d+E\d+/i, "").trim();
+            if (!seriesGroups.has(seriesName)) {
+              seriesGroups.set(seriesName, []);
+            }
+            seriesGroups.get(seriesName).push(item);
+          }
+        });
+  
+        for (const [seriesName, seriesEpisodes] of seriesGroups) {
+          console.log(`Processando série '${seriesName}' na categoria '${groupTitle}' com ID: ${categoryDbId}`);
+          const seriesMainEntryId = await insertSeriesToStreamsSeries(connection, seriesName, categoryDbId);
+          await insertEpisodesForSeries(connection, seriesEpisodes, categoryDbId, seriesMainEntryId);
         }
       }
-
-      for (const ep of insertedEpisodeIds) {
-        const insertEpisodeToSeriesQuery = `
-          INSERT INTO streams_episodes (season_num, episode_num, series_id, stream_id)
-          VALUES (?, ?, ?, ?)
-        `;
-        await connection.execute(insertEpisodeToSeriesQuery, [
-          ep.seasonNumber,
-          ep.episodeNumber,
-          seriesId,
-          ep.streamId
-        ]);
-      }
+  
+      console.log("Fechando conexão com o banco de dados.");
+      await connection.end();
+  
+      res.status(200).json({ sucesso: true, message: 'Categorias de séries e episódios inseridos e associados ao bouquet com sucesso.' });
+    } catch (error) {
+      console.log("Erro durante o processo:", error);
+      res.status(500).json({ sucesso: false, erro: 'Erro ao importar categorias de séries para o banco de dados.', detalhes: error.message });
     }
-
-    const allInsertedEpisodeIds = [];
-    for (const [categoryId, groupTitle] of uniqueCategories) {
-      const categoryDbId = await ensureCategoryExists(connection, groupTitle);
-      const seriesEpisodes = filteredCategories.filter(item => {
-        const categoryMatch = item.raw.match(/id-category="(\d+)"/);
-        return categoryMatch && parseInt(categoryMatch[1]) === parseInt(categoryId);
-      });
-
-      const seriesName = seriesEpisodes[0]?.tvg?.name.replace(/S\d+E\d+/i, "").trim();
-      const seriesMainEntryId = await insertSeriesToStreamsSeries(connection, seriesName, categoryDbId);
-      await insertEpisodesForSeries(connection, seriesEpisodes, categoryDbId, seriesMainEntryId);
-    }
-
-    console.log("Fechando conexão com o banco de dados.");
-    await connection.end();
-
-    res.status(200).json({ sucesso: true, message: 'Categorias de séries e episódios inseridos e associados ao bouquet com sucesso.' });
-  } catch (error) {
-    console.log("Erro durante o processo:", error);
-    res.status(500).json({ sucesso: false, erro: 'Erro ao importar categorias de séries para o banco de dados.', detalhes: error.message });
   }
-}
+  
+  
+  
+  
 };
 
 module.exports = SyncController;

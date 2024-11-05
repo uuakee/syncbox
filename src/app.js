@@ -6,7 +6,7 @@ const cookieParser = require('cookie-parser');
 
 // Configuração de CORS
 app.use(cors({
-    origin: "http://localhost:3000", // Substitua pelo domínio do seu frontend em produção
+    origin: "https://www.ecosentry.cloud", // Substitua pelo domínio do seu frontend em produção
     credentials: true // Habilita o envio de cookies
   }));
 app.use(cookieParser());
