@@ -2,7 +2,7 @@
     <img src="src/assets/logo.svg" alt="Syncbox Logo">
 </p>
 
-Syncbox é uma API para gestão de serviços de IPTV, focada em fornecer uma solução completa para sincronização e gerenciamento de séries e filmes. Atualmente, a API oferece um módulo de sincronização de conteúdo, que organiza séries e filmes de forma eficiente. Em breve, planejamos lançar um módulo de cobrança e controle de usuários, facilitando o gerenciamento financeiro e de acesso dos clientes.
+Syncbox é uma API para gestão de serviços de IPTV. Atualmente, a API oferece um módulo de sincronização de conteúdo, que organiza séries e filmes de forma eficiente.
 
 ## Funcionalidades
 
